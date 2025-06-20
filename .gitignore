@@ -21,3 +21,8 @@ hercules_uploads/
 # Example run artifacts
 hercules_minimal_run*/
 hercules_minimal_*.json
+
+# Build artifacts & distribution
+dist/
+build/
+*.egg-info/
