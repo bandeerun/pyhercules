@@ -5,8 +5,7 @@ hercules.py
 
 HERCULES (Hierarchical Embedding-based Recursive Clustering Using LLMs for Efficient Summarization)
 
-A package for hierarchical k-means clustering of text, numeric, or image data.
-Supports different representation modes and automatic determination of cluster counts.
+A package for hierarchical k-means clustering of text, numeric, or image data using LLMs.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 # pyHercules
 
-[![PyPI version](https://badge.fury.io/py/pyhercules-clustering.svg)](https://badge.fury.io/py/pyhercules-clustering)
+[![PyPI version](https://badge.fury.io/py/pyhercules.svg)](https://badge.fury.io/py/pyhercules)
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -12,8 +12,8 @@
 -   **Multi-Modal:** Natively handles text, numeric (NumPy, Pandas), and image data (file paths, URLs, PIL Images). (One modality at a time.)
 -   **LLM-Powered Summarization:** Uses Large Language Models (LLMs) to generate human-readable titles and descriptions for each cluster.
 -   **Flexible Representation:** Choose between `direct` mode (using original data embeddings) or `description` mode (using LLM-generated summary embeddings) for clustering at higher levels.
--   **Interactive Web App:** An included Dash application (`app.py`) allows for easy data upload, parameter configuration, and visualization of clustering results.
--   **Extensible:** The core library is dependency-light. Bring your own model functions or use the provided ones in `hercules_functions.py`.
+-   **Interactive Web App:** An included Dash application (`pyhercules_app.py`) allows for easy data upload, parameter configuration, and visualization of clustering results.
+-   **Extensible:** The core library is dependency-light. Bring your own model functions or use the provided ones in `pyhercules_functions.py`.
 
 ### Project Structure
 
@@ -26,14 +26,14 @@
 
 ### Installation
 
-You can install `pyhercules-clustering` directly from PyPI. Several installation options are available depending on your needs.
+You can install `pyhercules` directly from PyPI. Several installation options are available depending on your needs.
 
 **1. Core Library Only**
 
 For using the `Hercules` class with your own model client functions. This is a minimal, lightweight installation.
 
 ```bash
-pip install pyhercules-clustering
+pip install pyhercules
 ```
 
 **2. Library with Model Functions**
@@ -41,7 +41,7 @@ pip install pyhercules-clustering
 To use the pre-built functions in `pyhercules_functions.py` (e.g., for running the `examples.ipynb` notebook).
 
 ```bash
-pip install "pyhercules-clustering[models]"
+pip install "pyhercules[models]"
 ```
 
 **3. Full Web Application**
@@ -49,7 +49,7 @@ pip install "pyhercules-clustering[models]"
 To run the interactive Dash application, which includes all dependencies.
 
 ```bash
-pip install "pyhercules-clustering[app]"
+pip install "pyhercules[app]"
 ```
 
 ### Configuration: API Keys
@@ -72,7 +72,7 @@ The easiest way to get started is with the interactive app.
 
 1.  **Install dependencies:**
     ```bash
-    pip install "pyhercules-clustering[app]"
+    pip install "pyhercules[app]"
     ```
 2.  **Set API keys:** Create a `.env` file as described in the Configuration section.
 3.  **Run the app:**
