@@ -901,7 +901,7 @@ class Hercules:
     representation modes. Supports fixed or automatic cluster counts (k) per level.
     Includes optional sampling of immediate children for L2+ LLM prompts.
     """
-    HERCULES_VERSION = "1.0.0"
+    HERCULES_VERSION = "1.0.1"
     DEFAULT_REPRESENTATION_MODE = "direct"
     DEFAULT_MIN_CLUSTERS_PER_LEVEL = 2
     DEFAULT_FALLBACK_K = 2
