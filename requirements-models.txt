@@ -1,0 +1,14 @@
+# Installs core dependencies plus libraries for the provided model functions.
+-r requirements-core.txt
+
+# Heavy ML/AI libraries for models in hercules_functions.py and examples.
+accelerate
+google-generativeai
+huggingface_hub
+sentence-transformers
+torch
+transformers
+
+# Other dependencies
+requests
+python-dotenv

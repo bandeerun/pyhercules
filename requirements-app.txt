@@ -1,0 +1,7 @@
+# Installs all model dependencies plus the Dash web app libraries.
+-r requirements-models.txt
+
+# Dash application dependencies
+dash
+dash-bootstrap-components
+plotly

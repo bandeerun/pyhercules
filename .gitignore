@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+venv/
+env/
+
+# Hercules App specific
+hercules_uploads/
+
+# Environment variables
+.env
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Example run artifacts
+hercules_minimal_run*/
+hercules_minimal_*.json

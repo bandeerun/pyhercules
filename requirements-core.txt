@@ -1,0 +1,6 @@
+# Core dependencies for the Hercules library (hercules.py).
+# This is all you need if you provide your own model clients.
+numpy
+pandas
+scikit-learn
+Pillow
