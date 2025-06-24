@@ -1,5 +1,5 @@
 import base64
-import contextlib  # To capture print output
+import contextlib
 import io
 import json
 import math
@@ -12,14 +12,14 @@ import uuid
 import warnings
 import zipfile
 from collections import Counter, deque
-from datetime import datetime  # For download filenames
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import dash
 import dash_bootstrap_components as dbc
 import numpy as np
 import pandas as pd
-import plotly.express as px  # For color sequences
+import plotly.express as px
 import plotly.graph_objects as go
 from dotenv import load_dotenv
 # Load environment variables from .env file
@@ -50,7 +50,7 @@ try:
     print("Successfully imported hercules_functions.")
 except ImportError:
     print("FATAL: Failed to import 'pyhercules_functions.py'.", file=sys.stderr)
-    print("Please ensure 'hercules_functions.py' is in the same directory or Python path.", file=sys.stderr)
+    print("Please ensure 'pyhercules_functions.py' is in the same directory or Python path.", file=sys.stderr)
     sys.exit(1)
 
 # --- Constants ---
@@ -68,6 +68,7 @@ DEFAULT_OPACITY_UNRELATED = 0.3
 PREVIEW_TABLE_PAGE_SIZE = 10
 PREVIEW_MAX_FILES_LIST = 10
 PREVIEW_NROWS = 50
+RUN_LOG_FILENAME = "run_log.txt"
 
 # --- App Initialization ---
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.LUX, dbc.icons.BOOTSTRAP], suppress_callback_exceptions=True)
@@ -99,7 +100,8 @@ def get_file_list(directory_path):
     filepaths = []
     for root, _, files in os.walk(directory_path):
         for filename in files:
-            if not filename.startswith('.'):
+            # FIX: Explicitly ignore the run log file
+            if not filename.startswith('.') and filename != RUN_LOG_FILENAME:
                 filepaths.append(os.path.join(root, filename))
     return filepaths
 
@@ -108,7 +110,7 @@ def infer_data_and_prepare(session_dir: str) -> Tuple[Any, Optional[str], Option
     print(f"Note: Using directory data inference for {session_dir}.")
     all_files = get_file_list(session_dir)
     if not all_files:
-        return None, None, "No valid (non-hidden) files found in session directory."
+        return None, None, "No valid (non-hidden) data files found in session directory."
     image_files = [f for f in all_files if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS]
     text_files = [f for f in all_files if os.path.splitext(f)[1].lower() in TEXT_EXTENSIONS]
     tabular_files = [f for f in all_files if os.path.splitext(f)[1].lower() in TABULAR_EXTENSIONS]
@@ -380,7 +382,10 @@ def format_numeric_stats(stats_dict, precision=2):
     for var in sorted_vars:
         data = stats_dict[var]
         if not isinstance(data, dict) or 'mean' not in data:
-            items.append(dbc.Row([dbc.Col(html.Strong(f"{var}:"), width="auto"), dbc.Col("Invalid/incomplete stats", width=True, className="text-muted small")]))
+            items.append(dbc.Row([
+                dbc.Col(html.Strong(f"{var}:"), width="auto"),
+                dbc.Col("Invalid/incomplete stats", className="text-muted small")
+            ]))
             continue
         stat_cols = [dbc.Col(html.Strong(f"{var}:"), width="auto", className="pe-1 text-nowrap")]
         show_range = data.get('std', 0) > 1e-9 and 'min' in data and 'max' in data and data['min'] != data['max']
@@ -566,7 +571,13 @@ def create_summary_content(cluster_id, cluster_map, config_data, state_data, eva
                 num_precision = int(config_data.get('cluster_numeric_stats_precision', 2))
             except (ValueError, TypeError):
                 num_precision = 2
-            samples = cluster.get_representative_samples(sample_size=sample_size, numeric_repr_max_vals=num_repr_vals, numeric_repr_precision=num_precision) if hasattr(cluster, 'get_representative_samples') else []
+            variable_names = state_data.get('variable_names')
+            samples = cluster.get_representative_samples(
+                sample_size=sample_size, 
+                numeric_repr_max_vals=num_repr_vals, 
+                numeric_repr_precision=num_precision,
+                variable_names=variable_names
+            ) if hasattr(cluster, 'get_representative_samples') else []
             if samples:
                 body_content.append(html.Strong("Representative L0 Samples:", className="d-block mb-1"))
                 sample_items = []
@@ -809,13 +820,38 @@ def create_upload_layout():
             dbc.CardBody([
                 dbc.Alert(id='tabular-load-status', color="info", is_open=False, duration=6000, dismissable=True, className="d-flex align-items-center"),
                 dbc.Row([dbc.Col(dbc.Checklist(options=[{"label": "Data has header row", "value": "header"}], value=["header"], id="tabular-header-checkbox", switch=True), md=4, className="mb-2 d-flex align-items-center"), dbc.Col(dbc.InputGroup([dbc.InputGroupText("Index Column", className="small"), dbc.Input(id="tabular-index-input", placeholder="None, 0, or name", type="text", value="", debounce=True, size="sm")]), md=8, className="mb-2")], className="mb-3 align-items-center"),
+                html.Div(id='numeric-column-checklist-wrapper', children=[
+                    html.H6("Select Numeric Columns for Clustering:", className="mt-3"),
+                    dbc.Checklist(
+                        id='numeric-column-selector',
+                        options=[], value=[], # Initially empty
+                        inline=True, switch=True, className="mb-2"
+                    ),
+                    dbc.FormText("Only selected numeric columns will be used in the analysis.")
+                ], className="mt-3 mb-3 border-top pt-3", style={'display': 'none'}), # Initially hidden
                 html.H6("Data Preview (first 50 rows):"),
                 dash_table.DataTable(id='tabular-preview-table', page_size=PREVIEW_TABLE_PAGE_SIZE, style_table={'overflowX': 'auto', 'minWidth': '100%'}, style_cell={'textAlign': 'left', 'padding': '8px', 'maxWidth': 180, 'overflow': 'hidden', 'textOverflow': 'ellipsis', 'whiteSpace': 'nowrap', 'fontSize': '0.9em', 'border': '1px solid #eee'}, style_header={'backgroundColor': 'var(--bs-light)', 'fontWeight': 'bold', 'borderBottom': '2px solid #dee2e6'}, style_data={'border': '1px solid #eee'}, style_data_conditional=[{'if': {'row_index': 'odd'}, 'backgroundColor': 'rgba(0,0,0,.02)'}], tooltip_delay=0, tooltip_duration=None)])], className="mt-4 mb-4 shadow-sm", style={'display': 'none'}),
         html.H4("3. Run & Monitor", className="mb-3"),
         dbc.Row(dbc.Col(dbc.Button([html.I(className="bi bi-play-circle-fill me-2"), "Run Hercules Clustering"], id='run-button', n_clicks=0, color="primary", size="lg", className="fw-bold"), width={"size": 6, "offset": 3}, className="text-center mb-4")),
+        dcc.Interval(id='log-interval', interval=1000, n_intervals=0, disabled=True),
         dbc.Row(dbc.Col(dcc.Loading(id="loading-output", type="default", children=[
-             html.Div(id='status-updates', className="mb-3", style={'minHeight': '80px'}),
-        ]), width=12), className="mb-5"),
+             html.Div(id='status-updates', className="mb-3", style={'minHeight': '50px'}),
+        ]), width=12)),
+        dbc.Row(dbc.Col(
+            html.Div(id='live-log-container', children=[
+                html.H5("Run Log", className="mt-2"),
+                html.Pre(id='run-log-live', style={
+                    'whiteSpace': 'pre-wrap',
+                    'wordBreak': 'break-all',
+                    'maxHeight': '400px',
+                    'overflowY': 'scroll',
+                    'border': '1px solid #ddd',
+                    'padding': '10px',
+                    'backgroundColor': '#f8f9fa',
+                    'fontSize': '0.8em',
+                })
+            ], style={'display': 'none'}) # Initially hidden
+        ), className="mb-5"),
     ], fluid=True, id="upload-view-container")
 
 def create_results_layout(clusters_data: List[Dict], config_data: Dict, state_data: Dict, eval_results: Dict, run_log: str):
@@ -902,6 +938,7 @@ app.layout = html.Div([
     dcc.Store(id='session-id-store'), dcc.Store(id='temp-data-dir-store'), dcc.Store(id='uploaded-file-info-store'),
     dcc.Store(id='validated-load-params-store'), dcc.Store(id='ground-truth-data-store'),
     dcc.Store(id='hercules-results-store', storage_type='memory'),
+    dcc.Store(id='run-params-store'), dcc.Store(id='run-trigger-store'),
     dcc.Download(id='download-full-results-json'), dcc.Download(id='download-membership-csv'),
     dcc.Download(id='download-evaluation-json'), dcc.Download(id='download-hierarchy-txt'),
     dcc.Download(id='download-run-log-txt'),
@@ -961,32 +998,44 @@ def go_back_to_upload(back_clicks, error_clicks, session_id_to_clean):
     return (no_update,) * 7
 
 @callback(
-    Output('upload-status', 'children'), Output('temp-data-dir-store', 'data', allow_duplicate=True),
-    Output('session-id-store', 'data', allow_duplicate=True), Output('uploaded-file-info-store', 'data', allow_duplicate=True),
-    Output('tabular-options-card', 'style'), Output('tabular-preview-table', 'data'),
-    Output('tabular-preview-table', 'columns'), Output('tabular-preview-table', 'tooltip_data'),
-    Output('tabular-load-status', 'is_open', allow_duplicate=True), Output('validated-load-params-store', 'data', allow_duplicate=True),
-    Output('ground-truth-data-store', 'data', allow_duplicate=True), Output('ground-truth-upload-status', 'children', allow_duplicate=True),
-    Input('upload-data', 'contents'), State('upload-data', 'filename'), State('upload-data', 'last_modified'),
-    State('session-id-store', 'data'), prevent_initial_call=True)
+    Output('upload-status', 'children'),
+    Output('temp-data-dir-store', 'data', allow_duplicate=True),
+    Output('session-id-store', 'data', allow_duplicate=True),
+    Output('uploaded-file-info-store', 'data', allow_duplicate=True),
+    Output('tabular-options-card', 'style'),
+    Output('tabular-preview-table', 'data'),
+    Output('tabular-preview-table', 'columns'),
+    Output('validated-load-params-store', 'data', allow_duplicate=True),
+    Output('ground-truth-data-store', 'data', allow_duplicate=True),
+    Output('ground-truth-upload-status', 'children', allow_duplicate=True),
+    Input('upload-data', 'contents'),
+    State('upload-data', 'filename'),
+    State('upload-data', 'last_modified'),
+    State('session-id-store', 'data'),
+    prevent_initial_call=True
+)
 def handle_upload(list_of_contents, list_of_names, list_of_dates, existing_session_id):
     if list_of_contents is None:
-        return (no_update,) * 12
+        return (no_update,) * 10
+
     print("Main data upload triggered. Clearing existing ground truth data/status if any.")
     clear_gt_data = None
     clear_gt_status = ""
     session_id = existing_session_id or str(uuid.uuid4())
     session_dir = os.path.join(UPLOAD_DIRECTORY, session_id)
-    if existing_session_id and os.path.exists(session_dir): # Clean if it's a re-upload to an existing session concept
-         try:
-             shutil.rmtree(session_dir)
-             print(f"Cleaned previous session directory: {session_id}")
-         except Exception as e:
-             print(f"Warning: Could not clean previous session directory {session_dir}: {e}", file=sys.stderr)
+    
+    # FIX: Aggressively clean the session directory on every new upload.
+    if os.path.exists(session_dir):
+        try:
+            shutil.rmtree(session_dir)
+            print(f"Cleaned previous session directory: {session_dir}")
+        except Exception as e:
+            print(f"Warning: Could not clean previous session directory {session_dir}: {e}", file=sys.stderr)
+            
     try:
         os.makedirs(session_dir, exist_ok=True)
     except OSError as e:
-        return (dbc.Alert([html.I(className="bi bi-x-octagon-fill me-2"), f"Error creating session directory: {e}"], color="danger"), None, session_id, None, {'display': 'none'}, None, None, None, False, None, clear_gt_data, clear_gt_status)
+        return (dbc.Alert([html.I(className="bi bi-x-octagon-fill me-2"), f"Error creating session directory: {e}"], color="danger"), None, session_id, None, {'display': 'none'}, None, None, None, clear_gt_data, clear_gt_status)
     upload_msgs = []
     saved_files = []
     try:
@@ -1030,9 +1079,10 @@ def handle_upload(list_of_contents, list_of_names, list_of_dates, existing_sessi
     except Exception as e:
         tb = traceback.format_exc()
         print(f"Upload Error: {e}\n{tb}", file=sys.stderr)
-        return (dbc.Alert([html.I(className="bi bi-x-octagon-fill me-2"), f"Error processing upload: {e}"], color="danger"), None, session_id, None, {'display': 'none'}, None, None, None, False, None, clear_gt_data, clear_gt_status)
+        return (dbc.Alert([html.I(className="bi bi-x-octagon-fill me-2"), f"Error processing upload: {e}"], color="danger"), None, session_id, None, {'display': 'none'}, None, None, None, clear_gt_data, clear_gt_status)
     if not saved_files:
-        return (upload_msgs + [dbc.Alert([html.I(className="bi bi-exclamation-triangle-fill me-2"), "No valid main data files found/extracted from upload."], color="warning")], None, session_id, None, {'display': 'none'}, None, None, None, False, None, clear_gt_data, clear_gt_status)
+        return (upload_msgs + [dbc.Alert([html.I(className="bi bi-exclamation-triangle-fill me-2"), "No valid main data files found/extracted from upload."], color="warning")], None, session_id, None, {'display': 'none'}, None, None, None, clear_gt_data, clear_gt_status)
+
     is_single_tabular = False
     file_info_for_store = None
     if len(saved_files) == 1:
@@ -1041,40 +1091,29 @@ def handle_upload(list_of_contents, list_of_names, list_of_dates, existing_sessi
         if f_ext in TABULAR_EXTENSIONS:
             is_single_tabular = True
             file_info_for_store = {'path': f_info['path'], 'type': 'tabular', 'ext': f_ext, 'name': f_info['name']}
+    
     if is_single_tabular:
-        print(f"Single tabular file detected: {file_info_for_store['path']}")
-        df_preview, err = load_tabular_data(file_info_for_store['path'], header=0, index_col=None, nrows=PREVIEW_NROWS) # Initial preview with defaults
-        if err:
-            status = dbc.Alert([html.I(className="bi bi-exclamation-triangle-fill me-2"), f"Uploaded '{file_info_for_store['name']}'. ", html.Strong("Preview failed:"), f" {err}. Check options below or file format."], color="warning", className="d-flex align-items-center")
-            return (upload_msgs + [status], None, session_id, file_info_for_store, {'display': 'block'}, None, None, None, False, None, clear_gt_data, clear_gt_status)
-        else:
-             preview_data = df_preview.to_dict('records')
-             preview_cols = [{"name": list(map(str, i)), "id": ".".join(map(str, i))} for i in df_preview.columns] if isinstance(df_preview.columns, pd.MultiIndex) else [{"name": str(i), "id": str(i)} for i in df_preview.columns]
-             preview_tips = [{col['id']: {'value': str(row.get(col['id'], '')), 'type': 'markdown'} for col in preview_cols if col['id'] in row} for row in preview_data[:PREVIEW_TABLE_PAGE_SIZE]] if preview_data and preview_cols else []
-             status = dbc.Alert([html.I(className="bi bi-check-circle-fill me-2"), f"Detected tabular file: '{file_info_for_store['name']}'. Review options/preview below."], color="success", duration=6000, dismissable=True, className="d-flex align-items-center")
-             return (upload_msgs + [status], None, session_id, file_info_for_store, {'display': 'block'}, preview_data, preview_cols, preview_tips, False, {'header': 0, 'index_col': None}, clear_gt_data, clear_gt_status) # Store default load params
-    else: # Multiple files or non-tabular single file (session_dir is the data source)
+        print(f"Single tabular file detected: {file_info_for_store['path']}. Triggering preview update.")
+        status = dbc.Alert([html.I(className="bi bi-check-circle-fill me-2"), f"Detected tabular file: '{file_info_for_store['name']}'. Configure options below."], color="success", duration=8000, dismissable=True)
+        # Set stores to trigger the update_tabular_preview callback
+        return (upload_msgs + [status], None, session_id, file_info_for_store, {'display': 'block'}, None, None, {'header': 0, 'index_col': None}, clear_gt_data, clear_gt_status)
+    else: # Multiple files or non-tabular single file
         print(f"{len(saved_files)} files uploaded to session directory: {session_dir}")
         num_files = len(saved_files)
         f_types = Counter(os.path.splitext(f['path'])[1].lower() for f in saved_files)
         img_count = sum(c for ext, c in f_types.items() if ext in IMAGE_EXTENSIONS)
         txt_count = sum(c for ext, c in f_types.items() if ext in TEXT_EXTENSIONS)
         tab_count = sum(c for ext, c in f_types.items() if ext in TABULAR_EXTENSIONS)
-        summary = [html.Strong(f"Processed {num_files} file(s):")]
-        if img_count:
-            summary.append(html.Li(f"{img_count} image file(s)"))
-        if txt_count:
-            summary.append(html.Li(f"{txt_count} text file(s)"))
-        if tab_count:
-            summary.append(html.Li(f"{tab_count} tabular file(s) (will use directory inference if run)"))
-        if num_files - img_count - txt_count - tab_count:
-            summary.append(html.Li(f"{num_files - img_count - txt_count - tab_count} other file(s)"))
-        summary.extend([html.Hr(style={'margin': '8px 0'}), html.Strong(f"First {min(num_files, PREVIEW_MAX_FILES_LIST)} file(s):"), html.Ul([html.Li(f['name'], className="small text-muted text-truncate") for f in saved_files[:PREVIEW_MAX_FILES_LIST]], style={'paddingLeft': '20px', 'marginTop': '5px', 'maxHeight': '100px', 'overflowY': 'auto'})])
-        if num_files > PREVIEW_MAX_FILES_LIST:
-            summary.append(html.Em(f"...and {num_files - PREVIEW_MAX_FILES_LIST} more.", className="small"))
-        summary.append(html.P("Configure Hercules below and click Run.", className="mt-2 mb-0"))
-        # For directory uploads, temp_data_dir_store is set to session_dir, uploaded_file_info_store is None
-        return (upload_msgs + [dbc.Alert([html.I(className="bi bi-info-circle-fill me-2"), html.Div(summary)], color="info", className="d-flex align-items-start")], session_dir, session_id, None, {'display': 'none'}, None, None, None, False, None, clear_gt_data, clear_gt_status)
+        summary_list = [html.Strong(f"Processed {num_files} file(s):")]
+        if img_count: summary_list.append(html.Li(f"{img_count} image file(s)"))
+        if txt_count: summary_list.append(html.Li(f"{txt_count} text file(s)"))
+        if tab_count: summary_list.append(html.Li(f"{tab_count} tabular file(s) (will use directory inference if run)"))
+        if num_files - img_count - txt_count - tab_count: summary_list.append(html.Li(f"{num_files - img_count - txt_count - tab_count} other file(s)"))
+        summary_list.extend([html.Hr(style={'margin': '8px 0'}), html.Strong(f"First {min(num_files, PREVIEW_MAX_FILES_LIST)} file(s):"), html.Ul([html.Li(f['name'], className="small text-muted text-truncate") for f in saved_files[:PREVIEW_MAX_FILES_LIST]], style={'paddingLeft': '20px', 'marginTop': '5px', 'maxHeight': '100px', 'overflowY': 'auto'})])
+        if num_files > PREVIEW_MAX_FILES_LIST: summary_list.append(html.Em(f"...and {num_files - PREVIEW_MAX_FILES_LIST} more.", className="small"))
+        summary_list.append(html.P("Configure Hercules below and click Run.", className="mt-2 mb-0"))
+        summary = html.Div(summary_list)
+        return (upload_msgs + [dbc.Alert([html.I(className="bi bi-info-circle-fill me-2"), summary], color="info", className="d-flex align-items-start")], session_dir, session_id, None, {'display': 'none'}, None, None, None, clear_gt_data, clear_gt_status)
 
 @callback(
     Output('ground-truth-upload-status', 'children'), Output('ground-truth-data-store', 'data', allow_duplicate=True),
@@ -1107,209 +1146,252 @@ def handle_ground_truth_upload(contents, filename):
         return dbc.Alert([html.I(className="bi bi-check-circle-fill me-2"), status_msg], color="success", duration=6000, dismissable=True), parsed_gt
 
 @callback(
-    Output('tabular-preview-table', 'data', allow_duplicate=True), Output('tabular-preview-table', 'columns', allow_duplicate=True),
-    Output('tabular-preview-table', 'tooltip_data', allow_duplicate=True), Output('tabular-load-status', 'children', allow_duplicate=True),
-    Output('tabular-load-status', 'color', allow_duplicate=True), Output('tabular-load-status', 'is_open', allow_duplicate=True),
+    Output('tabular-preview-table', 'data', allow_duplicate=True),
+    Output('tabular-preview-table', 'columns', allow_duplicate=True),
+    Output('tabular-preview-table', 'tooltip_data', allow_duplicate=True),
+    Output('tabular-load-status', 'children', allow_duplicate=True),
+    Output('tabular-load-status', 'color', allow_duplicate=True),
+    Output('tabular-load-status', 'is_open', allow_duplicate=True),
     Output('validated-load-params-store', 'data', allow_duplicate=True),
-    Input('tabular-header-checkbox', 'value'), Input('tabular-index-input', 'value'),
-    State('uploaded-file-info-store', 'data'), prevent_initial_call=True)
+    Output('numeric-column-selector', 'options'),
+    Output('numeric-column-selector', 'value'),
+    Output('numeric-column-checklist-wrapper', 'style'),
+    Input('tabular-header-checkbox', 'value'),
+    Input('tabular-index-input', 'value'),
+    Input('uploaded-file-info-store', 'data'),
+    prevent_initial_call=True)
 def update_tabular_preview(header_check, index_input, uploaded_file_info):
-    if not callback_context.triggered or not uploaded_file_info or 'path' not in uploaded_file_info:
-        return no_update, no_update, no_update, "Error: No tabular file info.", "danger", True, no_update
+    if not uploaded_file_info or 'path' not in uploaded_file_info:
+        return (no_update,) * 10
+
     filepath = uploaded_file_info['path']
-    filename = uploaded_file_info.get('name', os.path.basename(filepath))
     header_row = 0 if "header" in (header_check or []) else None
     index_col = str(index_input).strip() if index_input is not None and str(index_input).strip() else None
-    print(f"Updating preview for '{filename}': header={header_row}, index='{index_col}'")
+
+    print(f"Updating preview for '{os.path.basename(filepath)}': header={header_row}, index='{index_col}'")
     df_preview, err = load_tabular_data(filepath, header=header_row, index_col=index_col, nrows=PREVIEW_NROWS)
-    valid_params = None
-    preview_data = None
-    preview_cols = []
-    preview_tips = []
+
+    valid_params, preview_data, preview_cols, preview_tips = None, None, [], []
+    selector_options, selector_value, selector_style = [], [], {'display': 'none'}
     icon_map = {"danger": "bi-x-octagon-fill", "warning": "bi-exclamation-triangle-fill", "success": "bi-check-circle-fill"}
-    status_msg = ""
-    status_color = "info"
-    status_open = False
+    status_msg, status_color, status_open = "", "info", False
+
     if err:
         status_msg = f"Error updating preview: {err}"
-        status_color = "danger"
-        status_open = True
+        status_color, status_open = "danger", True
     elif df_preview is None:
-        status_msg = "Error: Load returned None."
-        status_color = "danger"
-        status_open = True
-    elif df_preview.empty:
-        status_msg = "Preview updated. Note: File loaded empty (or only header/index)."
-        status_color = "warning"
-        status_open = True
-        try:
-            preview_cols = [{"name": list(map(str, i)), "id": ".".join(map(str, i))} for i in df_preview.columns] if isinstance(df_preview.columns, pd.MultiIndex) else [{"name": str(i), "id": str(i)} for i in df_preview.columns]
-        except Exception:
-            pass # Best effort for columns if empty
-        valid_params = {'header': header_row, 'index_col': index_col}
+        status_msg, status_color, status_open = "Error: Load returned None.", "danger", True
     else:
-        status_msg = "Preview updated successfully."
-        status_color = "success"
-        status_open = True
-        preview_data = df_preview.to_dict('records')
-        try:
-            preview_cols = [{"name": list(map(str, i)), "id": ".".join(map(str, i))} for i in df_preview.columns] if isinstance(df_preview.columns, pd.MultiIndex) else [{"name": str(i), "id": str(i)} for i in df_preview.columns]
-        except Exception as col_e:
-            status_msg += f" (Warning: Column generation error: {col_e})"
-            status_color="warning"
-        if preview_data and preview_cols:
-            try:
-                preview_tips = [{col['id']: {'value': str(row.get(col['id'], '')), 'type': 'markdown'} for col in preview_cols if col['id'] in row} for row in preview_data[:PREVIEW_TABLE_PAGE_SIZE]]
-            except Exception as tt_e:
-                status_msg += f" (Warning: Tooltip generation error: {tt_e})"
-                status_color="warning"
         valid_params = {'header': header_row, 'index_col': index_col}
-    return preview_data, preview_cols, preview_tips, [html.I(className=f"bi {icon_map.get(status_color, 'bi-info-circle-fill')} me-2"), status_msg], status_color, status_open, valid_params
+        if df_preview.empty:
+            status_msg = "Preview updated. Note: File loaded empty (or only header/index)."
+            status_color, status_open = "warning", True
+        else:
+            status_msg, status_color, status_open = "Preview updated successfully.", "success", True
+            preview_data = df_preview.to_dict('records')
+            try:
+                preview_cols = [{"name": list(map(str, i)), "id": ".".join(map(str, i))} for i in df_preview.columns] if isinstance(df_preview.columns, pd.MultiIndex) else [{"name": str(i), "id": str(i)} for i in df_preview.columns]
+                if preview_data:
+                    preview_tips = [{col['id']: {'value': str(row.get(col['id'], '')), 'type': 'markdown'} for col in preview_cols if col['id'] in row} for row in preview_data[:PREVIEW_TABLE_PAGE_SIZE]]
+            except Exception as e:
+                status_msg += f" (Warning creating preview: {e})"
+                status_color = "warning"
+
+        numeric_cols = df_preview.select_dtypes(include=np.number).columns.tolist()
+        if numeric_cols:
+            selector_options = [{'label': str(col), 'value': str(col)} for col in numeric_cols]
+            selector_value = [str(col) for col in numeric_cols] # All selected by default
+            selector_style = {'display': 'block'}
+        elif df_preview is not None:
+             # Keep it hidden but ensure the component ID is in the layout
+             selector_style = {'display': 'none'}
+
+    status_div = [html.I(className=f"bi {icon_map.get(status_color, 'bi-info-circle-fill')} me-2"), status_msg]
+    return preview_data, preview_cols, preview_tips, status_div, status_color, status_open, valid_params, selector_options, selector_value, selector_style
+
 
 @callback(
-    Output('hercules-results-store', 'data', allow_duplicate=True),
+    Output('run-button', 'disabled'),
+    Output('run-params-store', 'data'),
+    Output('run-trigger-store', 'data'),
+    Output('live-log-container', 'style'),
+    Output('log-interval', 'disabled'),
     Output('status-updates', 'children', allow_duplicate=True),
     Input('run-button', 'n_clicks'),
     State('representation-mode-input', 'value'), State('cluster-counts-input', 'value'), State('topic-seed-input', 'value'),
     State('text-embedder-select', 'value'), State('llm-select', 'value'), State('image-embedder-select', 'value'),
-    State('image-captioner-select', 'value'), State('temp-data-dir-store', 'data'), State('uploaded-file-info-store', 'data'),
-    State('validated-load-params-store', 'data'), State('ground-truth-data-store', 'data'), prevent_initial_call=True)
-def run_hercules_clustering(n_clicks, rep_mode, counts_str, topic_seed, txt_emb_name, llm_name, img_emb_name, img_cap_name, temp_data_dir, uploaded_file_info, valid_load_params, ground_truth_data):
-    if n_clicks == 0:
-        return no_update, "Awaiting run command."
-    print("\n--- run_hercules_clustering triggered ---")
-    status = [html.Div([html.I(className="bi bi-hourglass-split me-2"), html.Strong("Processing started...")])]
-    start_time = time.time()
-    log_stream = io.StringIO()
-    input_data = None
-    data_type = None
-    load_params = None
-    data_desc = "Unknown"
-    parsed_gt = None
-    results_pkg = None
-    final_status_alert = None
+    State('image-captioner-select', 'value'), State('numeric-column-selector', 'value'),
+    prevent_initial_call=True
+)
+def initiate_run(n_clicks, rep_mode, counts_str, topic_seed, txt_emb, llm, img_emb, img_cap, selected_cols):
+    if not n_clicks:
+        return no_update, no_update, no_update, no_update, no_update, no_update
+
+    params = {
+        'rep_mode': rep_mode, 'counts_str': counts_str, 'topic_seed': topic_seed,
+        'txt_emb_name': txt_emb, 'llm_name': llm, 'img_emb_name': img_emb,
+        'img_cap_name': img_cap, 'selected_columns': selected_cols
+    }
+    initial_status = dbc.Alert([html.I(className="bi bi-hourglass-split me-2"), "Run initiated... Hercules is starting."], color="info")
+    
+    # Disable button, store params, trigger run, show log viewer, enable interval, set initial status
+    return True, params, str(uuid.uuid4()), {'display': 'block'}, False, initial_status
+
+@callback(
+    Output('run-log-live', 'children'),
+    Input('log-interval', 'n_intervals'),
+    State('session-id-store', 'data'),
+    prevent_initial_call=True
+)
+def update_live_log(n, session_id):
+    if not session_id:
+        return no_update
+    
+    log_filepath = os.path.join(UPLOAD_DIRECTORY, session_id, RUN_LOG_FILENAME)
     try:
-        level_counts = parse_cluster_counts(counts_str)
-        if level_counts is None:
-            raise ValueError("Invalid Cluster Counts. Use comma-separated positive integers (e.g., 10, 5). Leave blank for auto-k if supported by Hercules version.")
-        seed = topic_seed.strip() if topic_seed else None
-        status.append(html.P(f"Params: Mode={rep_mode}, Levels={level_counts or 'Auto'}, Seed={seed or 'None'}", className="small mb-1"))
-        print(f"Run params: Mode={rep_mode}, Counts={level_counts or 'Auto'}, Seed={seed}", file=log_stream)
-        if ground_truth_data and isinstance(ground_truth_data, dict):
-            parsed_gt = ground_truth_data
-            gt_msg = f"Using provided ground truth ({len(parsed_gt)} entries)."
-            status.append(html.P([html.I(className="bi bi-check-circle-fill me-2 text-success"), gt_msg], className="small mb-1"))
-            print(gt_msg, file=log_stream)
-        else:
-            print("No ground truth provided or it's invalid.", file=log_stream)
-        if uploaded_file_info and 'path' in uploaded_file_info and valid_load_params is not None: # Single tabular file scenario
-            filepath = uploaded_file_info['path']
-            filename = uploaded_file_info.get('name', os.path.basename(filepath))
-            header = valid_load_params.get('header')
-            index_col = valid_load_params.get('index_col')
-            data_desc = f"Tabular: '{filename}' (H={header}, I='{index_col}')"
-            status.append(html.P(f"Loading from: {data_desc}", className="small mb-1"))
-            print(f"Loading full data: {data_desc}", file=log_stream)
-            df_full, err = load_tabular_data(filepath, header=header, index_col=index_col, nrows=None)
-            if err:
-                raise ValueError(f"Tabular Load Error: {err}")
-            if df_full is None or df_full.empty:
-                raise ValueError("Tabular file loaded empty.")
-            df_numeric = df_full.select_dtypes(include=np.number)
-            if df_numeric.empty:
-                raise ValueError(f"Loaded file '{filename}' has no numeric columns usable for clustering.")
-            if df_numeric.shape[1] < df_full.shape[1]:
-                drop_msg = f"Note: Dropped non-numeric columns: {', '.join(df_full.columns.difference(df_numeric.columns).tolist())}"
-                print(drop_msg, file=log_stream)
-                status.append(html.P(drop_msg, className="small text-muted mb-1"))
-            input_data = df_numeric
-            data_type = 'numeric'
-            load_params = valid_load_params
-            status.append(html.P(f"Interpreting data as NUMERIC (Shape: {input_data.shape}).", className="small mb-1"))
-        elif temp_data_dir: # Directory of files (text, images, or mixed)
-            data_desc = f"Files in Session: {os.path.basename(temp_data_dir)}"
-            status.append(html.P(f"Preparing data from: {data_desc}", className="small mb-1"))
-            print(f"Inferring data from directory: {temp_data_dir}", file=log_stream)
-            inferred_data, inferred_type, inferred_err = infer_data_and_prepare(temp_data_dir)
-            if inferred_err:
-                raise ValueError(f"Data Inference Error: {inferred_err}")
-            if inferred_data is None or inferred_type is None:
-                raise ValueError("Could not load or determine data type from directory files.")
-            input_data = inferred_data
-            data_type = inferred_type
-            status.append(html.P(f"Inferred data as {data_type.upper()} ({len(input_data) if isinstance(input_data, (dict, list)) else 'DataFrame shape ' + str(getattr(input_data, 'shape', 'N/A')) }).", className="small mb-1"))
-        else:
-            raise ValueError("No data source specified (neither single tabular file nor session directory).")
-        sel_txt_emb = hf.get_function_by_name(txt_emb_name, hf.AVAILABLE_TEXT_EMBEDDERS)
-        sel_llm = hf.get_function_by_name(llm_name, hf.AVAILABLE_LLMS)
-        sel_img_emb = hf.get_function_by_name(img_emb_name, hf.AVAILABLE_IMAGE_EMBEDDERS) if data_type == 'image' else None
-        sel_img_cap = hf.get_function_by_name(img_cap_name, hf.AVAILABLE_IMAGE_CAPTIONERS) if data_type == 'image' else None
-        if data_type != 'image' and (img_emb_name or img_cap_name):
-            print("Note: Image-specific functions selected but data is not image type; they will be ignored by Hercules.", file=log_stream)
-        status.append(html.P("Instantiating Hercules...", className="small mb-1"))
-        hercules = Hercules(level_cluster_counts=level_counts, representation_mode=rep_mode, text_embedding_client=sel_txt_emb, llm_client=sel_llm, image_embedding_client=sel_img_emb, image_captioning_client=sel_img_cap, reduction_methods=['pca'], random_state=42, verbose=True, save_run_details=False) # save_run_details can be True for more detailed logs from Hercules itself
-        print(f"Hercules v{getattr(hercules, '__version__', 'N/A')} instantiated.", file=log_stream)
-        status.append(html.P(f"Running clustering ({data_type.upper()} data)...", className="small mb-1"))
-        print(f"\n--- Starting Hercules Clustering ({data_type.upper()}) ---", file=log_stream)
-        with contextlib.redirect_stdout(log_stream):
-            top_clusters = hercules.cluster(input_data, topic_seed=seed)
-        print("\n--- Clustering Finished ---", file=log_stream)
-        if not hercules._all_clusters_map:
-            raise ValueError("Clustering finished, but no clusters were generated by Hercules.")
-        status.append(html.P("Running evaluation...", className="small mb-1"))
-        eval_results = {}
-        if hercules.max_level > 0:
-             gt_eval_msg = "(with GT)" if parsed_gt else "(unsupervised only)"
-             print(f"\n--- Running Evaluation {gt_eval_msg} ---", file=log_stream)
-             for level_idx in range(1, hercules.max_level + 1):
-                 print(f"  Evaluating Level {level_idx}...", file=log_stream, end="")
-                 with warnings.catch_warnings(record=True) as caught_warnings:
-                     warnings.simplefilter("always") # Capture all warnings
-                     try:
-                          res = hercules.evaluate_level(level=level_idx, ground_truth_labels=parsed_gt)
-                          eval_results[str(level_idx)] = res
-                          metrics_summary = {k: v for k, v in res.items() if isinstance(v, (int, float))} # For concise log
-                          print(f" Done. Metrics: {metrics_summary}", file=log_stream)
-                     except Exception as eval_err:
-                         print(f" FAILED: {eval_err}", file=log_stream)
-                         eval_results[str(level_idx)] = {"error": str(eval_err)}
-                     for w in caught_warnings:
-                         print(f"    Eval Warning (L{level_idx}): {w.message}", file=log_stream)
-        else:
-            print("\nSkipping evaluation (no hierarchy above L0, or max_level is 0).", file=log_stream)
-        print("\n--- Evaluation Finished ---", file=log_stream)
-        clusters_serial = [c.to_light_dict() for c in hercules._all_clusters_map.values()]
-        cfg = {k: getattr(hercules, k, 'N/A') for k in ['level_cluster_counts', 'representation_mode', 'n_reduction_components', 'reduction_methods', 'random_state', 'max_prompt_tokens', 'prompt_sample_size', 'prompt_sample_trunc_len', 'direct_l0_text_trunc_len', 'min_clusters_per_level', 'fallback_k', 'cluster_numeric_repr_max_vals', 'cluster_numeric_stats_precision']}
-        cfg.update({"__hercules_version__": getattr(hercules, '__version__', 'N/A'), "topic_seed": seed, "selected_text_embedder": txt_emb_name, "selected_llm": llm_name, "selected_image_embedder": img_emb_name, "selected_image_captioner": img_cap_name})
-        state = {"variable_names": getattr(hercules, 'variable_names', None), "input_data_type": getattr(hercules, 'input_data_type', 'unknown'), "embedding_dims": getattr(hercules, 'embedding_dims_', {}), "max_level_achieved": getattr(hercules, 'max_level', 0), "num_l0_items": len(getattr(hercules, '_l0_clusters_ordered', [])), "scaler_params": {"mean_": hercules._scaler.mean_.tolist(), "scale_": hercules._scaler.scale_.tolist()} if hasattr(hercules, '_scaler') and hercules._scaler is not None else None, "_l0_original_ids_ordered": [str(c.original_id) for c in getattr(hercules, '_l0_clusters_ordered', [])], "tabular_load_params": load_params, "data_source_description": data_desc}
-        results_pkg = {"clusters": clusters_serial, "config": cfg, "state": state, "eval_results": eval_results}
-        duration = time.time() - start_time
-        status.append(html.P([html.I(className="bi bi-check-circle-fill me-2 text-success"), html.Strong(f"Finished in {duration:.2f}s. Results ready.")]))
-        final_status_alert = dbc.Alert(status, color="success", duration=8000, dismissable=True)
-        print("--- run_hercules_clustering finished successfully ---")
-        if os.environ.get("DASH_DEBUG_MODE", "False").lower() in ["true", "1", "t"]:
-            print(log_stream.getvalue()) # Print full log if in debug
-        try:
-            print(f"Estimated JSON payload size for Dash store: {len(json.dumps(results_pkg).encode('utf-8')) / (1024*1024):.2f} MB")
-        except Exception as json_err:
-            print(f"Could not estimate JSON size for Dash store: {json_err}")
+        with open(log_filepath, 'r', encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        return "Waiting for log file to be created..."
+    except Exception as e:
+        return f"Error reading log file: {e}"
+
+@callback(
+    Output('hercules-results-store', 'data', allow_duplicate=True),
+    Output('status-updates', 'children', allow_duplicate=True),
+    Output('log-interval', 'disabled', allow_duplicate=True),
+    Output('run-button', 'disabled', allow_duplicate=True),
+    Input('run-trigger-store', 'data'),
+    State('run-params-store', 'data'),
+    State('temp-data-dir-store', 'data'), State('uploaded-file-info-store', 'data'),
+    State('validated-load-params-store', 'data'), State('ground-truth-data-store', 'data'), 
+    State('session-id-store', 'data'),
+    prevent_initial_call=True)
+def run_hercules_clustering_logic(trigger, run_params, temp_data_dir, uploaded_file_info, valid_load_params, ground_truth_data, session_id):
+    if not trigger or not run_params or not session_id:
+        return no_update, dbc.Alert("Run trigger failed: Missing parameters or session.", color="danger"), True, False
+
+    start_time = time.time()
+    log_filepath = os.path.join(UPLOAD_DIRECTORY, session_id, RUN_LOG_FILENAME)
+    results_pkg, final_status_alert = None, None
+
+    # Unpack parameters
+    rep_mode = run_params.get('rep_mode')
+    counts_str = run_params.get('counts_str')
+    topic_seed = run_params.get('topic_seed')
+    txt_emb_name = run_params.get('txt_emb_name')
+    llm_name = run_params.get('llm_name')
+    img_emb_name = run_params.get('img_emb_name')
+    img_cap_name = run_params.get('img_cap_name')
+    selected_columns = run_params.get('selected_columns')
+
+    try:
+        with open(log_filepath, 'w', encoding='utf-8') as log_stream:
+            print("--- run_hercules_clustering triggered ---", file=log_stream)
+            input_data, data_type, load_params, data_desc, parsed_gt = None, None, None, "Unknown", None
+
+            level_counts = parse_cluster_counts(counts_str)
+            if level_counts is None and counts_str and counts_str.strip():
+                raise ValueError("Invalid Cluster Counts. Use comma-separated positive integers (e.g., 10, 5).")
+
+            seed = topic_seed.strip() if topic_seed else None
+            print(f"Run params: Mode={rep_mode}, Counts={level_counts or 'Auto'}, Seed={seed}", file=log_stream)
+            
+            if ground_truth_data and isinstance(ground_truth_data, dict):
+                parsed_gt = ground_truth_data
+                print(f"Using provided ground truth ({len(parsed_gt)} entries).", file=log_stream)
+
+            if uploaded_file_info and 'path' in uploaded_file_info and valid_load_params is not None: # Single tabular file
+                filepath, filename = uploaded_file_info['path'], uploaded_file_info.get('name', '...'),
+                header, index_col = valid_load_params.get('header'), valid_load_params.get('index_col')
+                data_desc = f"Tabular: '{filename}' (H={header}, I='{index_col}')"
+                print(f"Loading full data: {data_desc}", file=log_stream)
+                df_full, err = load_tabular_data(filepath, header=header, index_col=index_col)
+                if err: raise ValueError(f"Tabular Load Error: {err}")
+                if df_full is None or df_full.empty: raise ValueError("Tabular file loaded empty.")
+                df_numeric = df_full.select_dtypes(include=np.number)
+                if df_numeric.empty: raise ValueError(f"File '{filename}' has no numeric columns.")
+                
+                if selected_columns is not None:
+                    if not selected_columns: raise ValueError("No numeric columns were selected for clustering.")
+                    final_cols = [c for c in selected_columns if c in df_numeric.columns]
+                    if not final_cols: raise ValueError("None of the selected columns found in data.")
+                    print(f"Using {len(final_cols)} of {len(df_numeric.columns)} numeric columns.", file=log_stream)
+                    input_data = df_numeric[final_cols]
+                else:
+                    print("Warning: No column selection provided. Using all numeric columns.", file=log_stream)
+                    input_data = df_numeric
+                
+                data_type = 'numeric'
+                load_params = valid_load_params
+            elif temp_data_dir: # Directory of files
+                data_desc = f"Files in Session: {os.path.basename(temp_data_dir)}"
+                print(f"Inferring data from directory: {temp_data_dir}", file=log_stream)
+                input_data, data_type, err = infer_data_and_prepare(temp_data_dir)
+                if err: raise ValueError(f"Data Inference Error: {err}")
+            else:
+                raise ValueError("No data source specified.")
+            
+            print(f"Interpreting data as {data_type.upper()} ({len(input_data) if isinstance(input_data, (dict, list)) else 'Shape ' + str(getattr(input_data, 'shape', 'N/A')) }).", file=log_stream)
+            
+            sel_txt_emb = hf.get_function_by_name(txt_emb_name, hf.AVAILABLE_TEXT_EMBEDDERS)
+            sel_llm = hf.get_function_by_name(llm_name, hf.AVAILABLE_LLMS)
+            sel_img_emb = hf.get_function_by_name(img_emb_name, hf.AVAILABLE_IMAGE_EMBEDDERS) if data_type == 'image' else None
+            sel_img_cap = hf.get_function_by_name(img_cap_name, hf.AVAILABLE_IMAGE_CAPTIONERS) if data_type == 'image' else None
+
+            print("Instantiating Hercules...", file=log_stream)
+            hercules = Hercules(level_cluster_counts=level_counts, representation_mode=rep_mode, text_embedding_client=sel_txt_emb, llm_client=sel_llm, image_embedding_client=sel_img_emb, image_captioning_client=sel_img_cap, reduction_methods=['pca'], random_state=42, verbose=True, save_run_details=False)
+            
+            with contextlib.redirect_stdout(log_stream):
+                print(f"\n--- Starting Hercules Clustering ({data_type.upper()}) ---")
+                top_clusters = hercules.cluster(input_data, topic_seed=seed)
+                print("\n--- Clustering Finished ---\n")
+                if not hercules._all_clusters_map:
+                    raise ValueError("Clustering finished, but no clusters were generated.")
+
+                eval_results = {}
+                if hercules.max_level > 0:
+                    print("--- Running Evaluation ---")
+                    for level_idx in range(1, hercules.max_level + 1):
+                         with warnings.catch_warnings(record=True) as caught_warnings:
+                             warnings.simplefilter("always")
+                             try:
+                                 res = hercules.evaluate_level(level=level_idx, ground_truth_labels=parsed_gt)
+                                 eval_results[str(level_idx)] = res
+                             except Exception as eval_err:
+                                 print(f"  Level {level_idx} Eval FAILED: {eval_err}", file=sys.stderr)
+                                 eval_results[str(level_idx)] = {"error": str(eval_err)}
+                             for w in caught_warnings:
+                                 print(f"    Eval Warning (L{level_idx}): {w.message}")
+                    print("--- Evaluation Finished ---\n")
+
+            clusters_serial = [c.to_light_dict() for c in hercules._all_clusters_map.values()]
+            cfg = {k: getattr(hercules, k, 'N/A') for k in ['level_cluster_counts', 'representation_mode', 'reduction_methods', 'random_state']}
+            cfg.update({"selected_text_embedder": txt_emb_name, "selected_llm": llm_name, "selected_image_embedder": img_emb_name, "selected_image_captioner": img_cap_name})
+            state = {"variable_names": getattr(hercules, 'variable_names', None), "input_data_type": getattr(hercules, 'input_data_type', 'unknown'), "embedding_dims": getattr(hercules, 'embedding_dims_', {}), "max_level_achieved": getattr(hercules, 'max_level', 0), "num_l0_items": len(getattr(hercules, '_l0_clusters_ordered', [])), "_l0_original_ids_ordered": [str(c.original_id) for c in getattr(hercules, '_l0_clusters_ordered', [])], "tabular_load_params": load_params, "data_source_description": data_desc}
+            results_pkg = {"clusters": clusters_serial, "config": cfg, "state": state, "eval_results": eval_results}
+            
+            duration = time.time() - start_time
+            final_status_alert = dbc.Alert([html.I(className="bi bi-check-circle-fill me-2"), html.Strong(f"Finished in {duration:.2f}s. Results ready.")], color="success", duration=8000)
+            print(f"--- run_hercules_clustering finished successfully in {duration:.2f}s ---", file=log_stream)
+
     except Exception as e:
         tb = traceback.format_exc()
         err_msg = f"Error during Hercules run: {e}"
         print(f"{err_msg}\nTraceback:\n{tb}", file=sys.stderr)
-        print(f"\n--- HERCULES RUN FAILED ---\n{err_msg}\nTraceback:\n{tb}", file=log_stream)
-        status.append(html.P([html.I(className="bi bi-x-octagon-fill me-2 text-danger"), html.Strong(f"Error: {e}")]))
-        final_status_alert = dbc.Alert(status, color="danger")
-        print("--- run_hercules_clustering finished with error ---")
+        final_status_alert = dbc.Alert([html.I(className="bi bi-x-octagon-fill me-2"), html.Strong(f"Error: {e}")], color="danger")
+        with open(log_filepath, 'a', encoding='utf-8') as log_stream:
+             print(f"\n--- HERCULES RUN FAILED ---\n{err_msg}\nTraceback:\n{tb}", file=log_stream)
         results_pkg = None
     finally:
-        log_content = f"--- Run Log ---\n{log_stream.getvalue()}"
-        log_stream.close()
-        # Add the log to the results package if the run was successful
+        log_content = ""
+        if os.path.exists(log_filepath):
+            with open(log_filepath, 'r', encoding='utf-8') as f:
+                log_content = f.read()
         if results_pkg:
             results_pkg['run_log'] = log_content
 
-    return results_pkg, final_status_alert
+    return results_pkg, final_status_alert, True, False
 
 # =============================================================================
 # Results View Callbacks
