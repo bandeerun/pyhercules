@@ -118,6 +118,21 @@ if top_clusters:
         cluster.print_hierarchy(indent_increment=2, print_level_0=False)
 ```
 
+### Citation
+
+If you find `pyhercules` useful in your research, please consider citing our paper.
+
+```bibtex
+@misc{petnehazi2025hercules,
+      title={HERCULES: Hierarchical Embedding-based Recursive Clustering Using LLMs for Efficient Summarization}, 
+      author={Petnehazi, Gabor and Aradi, Bernadett},
+      year={2025},
+      eprint={2506.19992},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG}
+}
+```
+
 ### License
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
