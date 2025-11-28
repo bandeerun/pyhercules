@@ -378,7 +378,11 @@ class Cluster:
         if self.level == 0 or strategy == 'self':
             data_repr = f"Item {self.original_id}"
             if self.original_data_type == "text":
-                data_repr = self.description or self.title or str(self._raw_item_data or data_repr)
+                # For L0 text items, prioritize raw text data over placeholder description
+                if self.level == 0 and self._raw_item_data:
+                    data_repr = str(self._raw_item_data)
+                else:
+                    data_repr = self.description or self.title or str(self._raw_item_data or data_repr)
             elif self.original_data_type == "numeric":
                 data_to_format = self._raw_item_data
                 if data_to_format is not None and isinstance(data_to_format, np.ndarray):
