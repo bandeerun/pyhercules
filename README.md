@@ -123,13 +123,15 @@ if top_clusters:
 If you find `pyhercules` useful in your research, please consider citing our paper.
 
 ```bibtex
-@misc{petnehazi2025hercules,
-      title={HERCULES: Hierarchical Embedding-based Recursive Clustering Using LLMs for Efficient Summarization}, 
-      author={Petnehazi, Gabor and Aradi, Bernadett},
-      year={2025},
-      eprint={2506.19992},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG}
+@article{petnehazi2026hercules,
+  title   = {HERCULES: Hierarchical Embedding-based Recursive Clustering Using LLMs for Efficient Summarization},
+  author  = {Petnehazi, Gabor and Aradi, Bernadett},
+  journal = {International Journal of Cognitive Computing in Engineering},
+  volume  = {7},
+  pages   = {445--456},
+  year    = {2026},
+  doi     = {10.1016/j.ijcce.2026.04.002},
+  url     = {https://www.sciencedirect.com/science/article/pii/S2666307426000057}
 }
 ```
 
