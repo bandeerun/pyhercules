@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 # Third-party Library Imports
 import numpy as np
 import pandas as pd
+from scipy.cluster.hierarchy import linkage, fcluster
 from sklearn.cluster import KMeans, AgglomerativeClustering
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -906,7 +907,7 @@ class Hercules:
 
     sampling of immediate children for L2+ LLM prompts.
     """
-    HERCULES_VERSION = "1.1.0"
+    HERCULES_VERSION = "1.1.1"
     DEFAULT_CLUSTERING_METHOD = "kmeans"
     DEFAULT_AGGLOMERATIVE_LINKAGE = "ward"
     DEFAULT_AGGLOMERATIVE_METRIC = "euclidean"
@@ -2689,27 +2690,6 @@ IMPORTANT: Ensure the entire output is valid JSON. Do NOT include markdown fence
                     
                     level_rep_vectors = current_centroids
                     labels = current_labels
-                
-            elif self.clustering_method == 'agglomerative':
-                self._log(f"    Performing Agglomerative Clustering (k={k}, linkage='{self.agglomerative_linkage}', metric='{self.agglomerative_metric}') on {level_input_vectors.shape[0]} vectors for Level {current_level_num}...", level=2)
-                try:
-                    agg_model = AgglomerativeClustering(n_clusters=k, linkage=self.agglomerative_linkage, metric=self.agglomerative_metric)
-                    labels = agg_model.fit_predict(level_input_vectors)
-
-                    # Manually compute centroids
-                    centroids = np.zeros((k, level_input_vectors.shape[1]), dtype=np.float32)
-                    for i in range(k):
-                        members = level_input_vectors[labels == i]
-                        if members.shape[0] > 0:
-                            centroids[i] = members.mean(axis=0)
-                        else:
-                            warnings.warn(f"Agglomerative clustering produced an empty cluster (label {i}) at Level {current_level_num}. Centroid will be zero vector.")
-                    
-                    level_rep_vectors = centroids
-                    self._log(f"    Agglomerative Clustering for L{current_level_num} complete. Computed centroids shape: {level_rep_vectors.shape}", level=2)
-
-                except Exception as e_agg:
-                    print(f"Error during Agglomerative Clustering for L{current_level_num}: {e_agg}. Stopping hierarchy."); break
 
             if labels is None or level_rep_vectors is None:
                 self._log("Clustering failed to produce labels or centroids. Stopping hierarchy.", level=1); break
@@ -2762,6 +2742,197 @@ IMPORTANT: Ensure the entire output is valid JSON. Do NOT include markdown fence
             current_clusters = next_level_clusters
             last_successful_level = current_level_num
             self._log(f"Level {current_level_num} processing complete. {len(current_clusters)} clusters created.", level=1)
+
+        self._max_level = last_successful_level
+        return current_clusters
+
+    def _perform_agglomerative_clustering_loop(self, l0_clusters: list[Cluster]) -> list[Cluster]:
+        """
+        Performs hierarchical agglomerative clustering.
+        Computes the linkage tree ONCE on the Level 0 data, then slices the tree
+        at different K values for each level to form the nested hierarchy.
+        """
+        current_clusters = l0_clusters
+        max_level_iterations = len(self.level_cluster_counts) if self.level_cluster_counts is not None else 100
+        last_successful_level = 0
+        auto_k_mode = (self.level_cluster_counts is None)
+
+        if auto_k_mode: self._log(f"Automatic K determination enabled (Method: {self.auto_k_method}, Max K per level: {self.auto_k_max})", level=1)
+        else: self._log(f"Using fixed level cluster counts: {self.level_cluster_counts}", level=1)
+
+        # 1. Gather vectors and space strictly from L0
+        clustering_basis_space: str | None = None
+        l0_vectors = []
+        valid_l0_clusters = []
+
+        if self.representation_mode == 'direct':
+            valid_clusters = [c for c in l0_clusters if c.representation_vector is not None and c.representation_vector_space is not None]
+            if valid_clusters:
+                clustering_basis_space = valid_clusters[0].representation_vector_space
+                valid_l0_clusters = [c for c in valid_clusters if c.representation_vector_space == clustering_basis_space]
+                l0_vectors = [c.representation_vector for c in valid_l0_clusters]
+        elif self.representation_mode == 'description':
+            valid_clusters = [c for c in l0_clusters if c.description_embedding is not None]
+            if valid_clusters:
+                clustering_basis_space = 'text_embedding'
+                valid_l0_clusters = valid_clusters
+                l0_vectors = [c.description_embedding for c in valid_l0_clusters]
+
+        if not valid_l0_clusters or not l0_vectors:
+            self._log("No valid clusters/vectors from L0 to cluster. Stopping hierarchy.", level=1)
+            return l0_clusters
+
+        l0_input_vectors = np.array(l0_vectors).astype(np.float32)
+        n_l0_items = l0_input_vectors.shape[0]
+
+        if n_l0_items < self.min_clusters_per_level:
+            self._log(f"Only {n_l0_items} valid L0 items (min required: {self.min_clusters_per_level}). Stopping hierarchy.", level=1)
+            return l0_clusters
+
+        if not np.all(np.isfinite(l0_input_vectors)):
+            l0_input_vectors = np.nan_to_num(l0_input_vectors, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # 2. Compute the full Linkage Tree (Z)
+        self._log(f"Computing Agglomerative Linkage Tree on {n_l0_items} L0 items (linkage='{self.agglomerative_linkage}', metric='{self.agglomerative_metric}')...", level=1)
+        try:
+            Z = linkage(l0_input_vectors, method=self.agglomerative_linkage, metric=self.agglomerative_metric)
+        except Exception as e:
+            self._log(f"Error computing linkage tree: {e}. Stopping hierarchy.", level=1)
+            return l0_clusters
+
+        current_level_num = 1
+        current_k = n_l0_items
+        
+        # Lookup for mapping descendants easily
+        l0_cluster_to_idx = {c.id: i for i, c in enumerate(valid_l0_clusters)}
+
+        for level_idx in range(max_level_iterations):
+            self._log(f"\n--- Clustering Level {current_level_num} ---", level=1)
+            n_items_to_cluster = len(current_clusters)
+            if n_items_to_cluster < self.min_clusters_per_level:
+                self._log(f"Only {n_items_to_cluster} valid cluster(s) remain. Stopping hierarchy.", level=1)
+                break
+
+            vectors_for_clustering = []
+            for c in current_clusters:
+                if self.representation_mode == 'direct' and c.representation_vector is not None: vectors_for_clustering.append(c.representation_vector)
+                elif self.representation_mode == 'description' and c.description_embedding is not None: vectors_for_clustering.append(c.description_embedding)
+                else: vectors_for_clustering.append(np.zeros_like(l0_input_vectors[0]))
+            level_input_vectors = np.array(vectors_for_clustering)
+
+            k = -1
+            actual_min_k = self.min_clusters_per_level
+            actual_max_k = min(self.auto_k_max, current_k - 1)
+
+            if auto_k_mode:
+                if actual_max_k < actual_min_k:
+                    k = max(1, min(self.fallback_k, current_k - 1))
+                    self._log(f"  Invalid k range [{actual_min_k}, {actual_max_k}]. Using fallback_k={k}.", level=1)
+                else:
+                    self._log(f"  Determining optimal k using '{self.auto_k_method}' method...", level=1)
+                    best_score = -np.inf if self.auto_k_method in ['silhouette', 'calinski_harabasz'] else np.inf
+                    best_k = actual_min_k
+
+                    for candidate_k in range(actual_min_k, actual_max_k + 1):
+                        labels_L0_raw = fcluster(Z, t=candidate_k, criterion='maxclust')
+                        unique_labels = np.unique(labels_L0_raw)
+                        k_actual_cand = len(unique_labels)
+                        if k_actual_cand < 2: continue
+                        
+                        label_mapping = {val: idx for idx, val in enumerate(unique_labels)}
+                        labels_L0 = np.array([label_mapping[lbl] for lbl in labels_L0_raw])
+                        
+                        candidate_labels = []
+                        for c in current_clusters:
+                            l0_idx = l0_cluster_to_idx[c.get_level0_descendants()[0].id]
+                            candidate_labels.append(labels_L0[l0_idx])
+                        
+                        candidate_labels = np.array(candidate_labels)
+                        if len(np.unique(candidate_labels)) < 2: continue
+                            
+                        score = None
+                        try:
+                            if self.auto_k_method == 'silhouette':
+                                metric = self.auto_k_metric_params.get('metric', 'cosine' if clustering_basis_space in ['text_embedding', 'image_embedding'] else 'euclidean')
+                                valid_params = {p:v for p,v in self.auto_k_metric_params.items() if p != 'metric'}
+                                score = silhouette_score(level_input_vectors, candidate_labels, metric=metric, **valid_params)
+                                if score > best_score: best_score = score; best_k = candidate_k
+                            elif self.auto_k_method == 'davies_bouldin':
+                                score = davies_bouldin_score(level_input_vectors, candidate_labels)
+                                if score < best_score: best_score = score; best_k = candidate_k
+                            elif self.auto_k_method == 'calinski_harabasz':
+                                score = calinski_harabasz_score(level_input_vectors, candidate_labels)
+                                if score > best_score: best_score = score; best_k = candidate_k
+                            self._log(f"      k={candidate_k}, score={score:.4f}", level=3)
+                        except Exception as e:
+                            self._log(f"    Warning: Error calculating score for k={candidate_k}: {e}", level=2)
+                    k = best_k
+            else:
+                if level_idx >= len(self.level_cluster_counts): target_k = self.fallback_k
+                else: target_k = self.level_cluster_counts[level_idx]
+                k = max(1, min(max(self.min_clusters_per_level, int(target_k)), current_k - 1))
+
+            if k < 1 or k >= current_k:
+                self._log(f"Determined k={k} is invalid (must be 1 <= k < {current_k}). Stopping hierarchy.", level=1); break
+
+            self._log(f"    Cutting agglomerative tree at k={k} for Level {current_level_num}...", level=2)
+            labels_L0_raw = fcluster(Z, t=k, criterion='maxclust')
+            unique_labels = np.unique(labels_L0_raw)
+            k_actual = len(unique_labels)
+            label_mapping = {val: i for i, val in enumerate(unique_labels)}
+            labels_L0 = np.array([label_mapping[lbl] for lbl in labels_L0_raw])
+            
+            current_labels = np.zeros(len(current_clusters), dtype=int)
+            for i, c in enumerate(current_clusters):
+                l0_idx = l0_cluster_to_idx[c.get_level0_descendants()[0].id]
+                current_labels[i] = labels_L0[l0_idx]
+
+            level_rep_vectors = np.zeros((k_actual, l0_input_vectors.shape[1]), dtype=np.float32)
+            for i in range(k_actual):
+                members_l0 = l0_input_vectors[labels_L0 == i]
+                if members_l0.shape[0] > 0: level_rep_vectors[i] = members_l0.mean(axis=0)
+
+            self._log(f"Creating {k_actual} new parent clusters for Level {current_level_num}...", level=2)
+            new_parent_clusters_map = {} 
+            next_level_clusters = []
+            
+            for i, label_val in enumerate(current_labels):
+                child = current_clusters[i]
+                if label_val not in new_parent_clusters_map:
+                    parent = Cluster(level=current_level_num, original_data_type=current_clusters[0].original_data_type)
+                    parent.representation_vector = level_rep_vectors[label_val]
+                    parent.representation_vector_space = clustering_basis_space
+                    new_parent_clusters_map[label_val] = parent
+                    next_level_clusters.append(parent)
+                    self._all_clusters_map[parent.id] = parent
+                else: parent = new_parent_clusters_map[label_val]
+                
+                parent.children.append(child)
+                child.parent = parent
+
+            self._log(f"Processing {len(next_level_clusters)} new Level {current_level_num} clusters...", level=2)
+            clusters_needing_llm_desc = []
+            for parent in next_level_clusters:
+                parent._aggregate_numeric_data_from_children()
+                clusters_needing_llm_desc.append(parent)
+
+            if clusters_needing_llm_desc:
+                processed_llm_results, _ = self._get_llm_descriptions_batched(clusters_needing_llm_desc)
+                for parent in next_level_clusters:
+                    if parent.id in processed_llm_results:
+                         parent.title, parent.description = processed_llm_results[parent.id]
+
+            self._generate_and_assign_description_embeddings(next_level_clusters)
+            if self.reduction_methods:
+                self._apply_reductions_to_embeddings(next_level_clusters, 'representation_vector')
+                self._apply_reductions_to_embeddings(next_level_clusters, 'description_embedding')
+
+            current_clusters = next_level_clusters
+            current_k = k_actual
+            last_successful_level = current_level_num
+            current_level_num += 1
+            self._log(f"Level {last_successful_level} processing complete. {len(current_clusters)} clusters created.", level=1)
+            if k_actual == 1: break
 
         self._max_level = last_successful_level
         return current_clusters
@@ -2833,7 +3004,10 @@ IMPORTANT: Ensure the entire output is valid JSON. Do NOT include markdown fence
             return [] if not self._l0_clusters_ordered else self._l0_clusters_ordered
 
         self._log(f"Starting hierarchical loop with {len(valid_l0_clusters)} valid L0 clusters.", level=1)
-        top_level_clusters = self._perform_hierarchical_clustering_loop(valid_l0_clusters)
+        if self.clustering_method == 'agglomerative':
+            top_level_clusters = self._perform_agglomerative_clustering_loop(valid_l0_clusters)
+        else:
+            top_level_clusters = self._perform_hierarchical_clustering_loop(valid_l0_clusters)
 
         if self.save_run_details: self._save_prompt_log()
         self._log(f"\n--- Hercules Clustering Run Finished ---", level=1)
