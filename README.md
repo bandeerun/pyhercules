@@ -4,14 +4,15 @@
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**pyHercules** is a flexible Python framework for hierarchical clustering of text, numeric, or image data. The core algorithm, **Hercules**, uses recursive k-means and leverages Large Language Models (LLMs) for efficient and meaningful summarization of clusters at each level of the hierarchy. The project includes the core library (`pyhercules`), a set of "batteries-included" model functions, and a powerful Dash web application for interactive exploration.
+**pyHercules** is a flexible Python framework for hierarchical clustering of text, numeric, or image data. The core algorithm, **Hercules**, uses hierarchical clustering algorithms (like recursive k-means or agglomerative clustering) and leverages Large Language Models (LLMs) for efficient and meaningful summarization of clusters at each level of the hierarchy. The project includes the core library (`pyhercules`), a set of "batteries-included" model functions, and a powerful Dash web application for interactive exploration.
 
 ### Key Features
 
 -   **Hierarchical Clustering:** Automatically builds a tree of clusters from your data.
+-   **Choice of Clustering Algorithm:** Select between `'kmeans'` (default) for iterative partitioning or `'agglomerative'` clustering for a bottom-up hierarchical approach.
 -   **Multi-Modal:** Natively handles text, numeric (NumPy, Pandas), and image data (file paths, URLs, PIL Images). (One modality at a time.)
 -   **LLM-Powered Summarization:** Uses Large Language Models (LLMs) to generate human-readable titles and descriptions for each cluster.
--   **Flexible Representation:** Choose between `direct` mode (using original data embeddings) or `description` mode (using LLM-generated summary embeddings) for clustering at higher levels.
+-   **Flexible Representation:** For k-means, choose between `direct` mode (using original data embeddings) or `description` mode (using LLM-generated summary embeddings) for clustering at higher levels.
 -   **Interactive Web App:** An included Dash application (`pyhercules_app.py`) allows for easy data upload, parameter configuration, and visualization of clustering results.
 -   **Extensible:** The core library is dependency-light. Bring your own model functions or use the provided ones in `pyhercules_functions.py`.
 

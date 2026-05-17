@@ -5,7 +5,7 @@ hercules.py
 
 HERCULES (Hierarchical Embedding-based Recursive Clustering Using LLMs for Efficient Summarization)
 
-A package for hierarchical k-means clustering of text, numeric, or image data using LLMs.
+A package for hierarchical k-means or agglomerative clustering of text, numeric, or image data using LLMs.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 # Third-party Library Imports
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, AgglomerativeClustering
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
@@ -899,12 +899,17 @@ class Hercules:
     Hercules Hierarchical Clustering.
 
     Handles text, numeric (with optional metadata), and image data with
-    configurable parameters and evaluation. Uses k-means hierarchically with
-    LLM-generated cluster descriptions. Offers 'direct' or 'description' based
-    representation modes. Supports fixed or automatic cluster counts (k) per level.
-    Includes optional sampling of immediate children for L2+ LLM prompts.
+    configurable parameters and evaluation. Uses k-means or agglomerative
+    clustering hierarchically with LLM-generated cluster descriptions.
+    Offers 'direct' or 'description' based representation modes. Supports
+    fixed or automatic cluster counts (k) per level. Includes optional
+
+    sampling of immediate children for L2+ LLM prompts.
     """
-    HERCULES_VERSION = "1.0.3"
+    HERCULES_VERSION = "1.1.0"
+    DEFAULT_CLUSTERING_METHOD = "kmeans"
+    DEFAULT_AGGLOMERATIVE_LINKAGE = "ward"
+    DEFAULT_AGGLOMERATIVE_METRIC = "euclidean"
     DEFAULT_REPRESENTATION_MODE = "direct"
     DEFAULT_MIN_CLUSTERS_PER_LEVEL = 2
     DEFAULT_FALLBACK_K = 2
@@ -950,6 +955,9 @@ class Hercules:
                  llm_client: Optional[Callable[[str], str]] = None,
                  image_embedding_client: Optional[Callable[[list[Any]], np.ndarray]] = None,
                  image_captioning_client: Optional[Callable[[list[Any], Optional[str]], list[str]]] = None,
+                 clustering_method: str = DEFAULT_CLUSTERING_METHOD,
+                 agglomerative_linkage: str = DEFAULT_AGGLOMERATIVE_LINKAGE,
+                 agglomerative_metric: str = DEFAULT_AGGLOMERATIVE_METRIC,
                  representation_mode: str = DEFAULT_REPRESENTATION_MODE,
                  auto_k_method: str = DEFAULT_AUTO_K_METHOD,
                  auto_k_max: int = DEFAULT_AUTO_K_MAX,
@@ -997,6 +1005,9 @@ class Hercules:
             llm_client: Function for LLM calls (description generation).
             image_embedding_client: Function for embedding images (optional).
             image_captioning_client: Function for captioning images (optional).
+            clustering_method: 'kmeans' or 'agglomerative'.
+            agglomerative_linkage: Linkage for agglomerative clustering (e.g., 'ward', 'complete').
+            agglomerative_metric: Metric for agglomerative clustering (e.g., 'euclidean', 'cosine').
             representation_mode: 'direct' or 'description'.
             auto_k_method: Metric for auto-k ('silhouette', 'davies_bouldin', 'calinski_harabasz').
             auto_k_max: Max k to test per level for auto-k.
@@ -1031,7 +1042,7 @@ class Hercules:
             cluster_numeric_stats_precision: Precision for stored numeric stats.
             cluster_print_indent_increment: Spaces per level in print_hierarchy.
             use_llm_for_l0_descriptions: Use LLM for L0 text/numeric descriptions (default False).
-            use_resampling: Whether to use iterative resampling-clustering.
+            use_resampling: Whether to use iterative resampling-clustering (k-means only).
             resampling_points_per_cluster: Number of points to sample from each cluster in resampling.
             resampling_iterations: Number of resampling iterations.
         """
@@ -1095,6 +1106,23 @@ class Hercules:
             if not isinstance(level_cluster_counts, list) or not all(isinstance(k, int) and k > 0 for k in level_cluster_counts):
                 raise ValueError("`level_cluster_counts`, if provided, must be a list of positive integers.")
         self.level_cluster_counts = level_cluster_counts
+
+        # --- Clustering Method Configuration ---
+        if clustering_method not in ['kmeans', 'agglomerative']:
+            raise ValueError("`clustering_method` must be 'kmeans' or 'agglomerative'.")
+        self.clustering_method = clustering_method
+        self.agglomerative_linkage = agglomerative_linkage
+        self.agglomerative_metric = agglomerative_metric
+        if self.agglomerative_linkage == 'ward' and self.agglomerative_metric != 'euclidean':
+            warnings.warn("Agglomerative linkage 'ward' requires 'euclidean' metric. Overriding metric to 'euclidean'.")
+            self.agglomerative_metric = 'euclidean'
+        self.use_resampling = use_resampling
+        if self.clustering_method == 'agglomerative' and self.use_resampling:
+            warnings.warn("'use_resampling' is only applicable to 'kmeans' clustering_method. Disabling resampling.")
+            self.use_resampling = False
+        self.resampling_points_per_cluster = max(1, resampling_points_per_cluster)
+        self.resampling_iterations = max(1, resampling_iterations)
+
         if representation_mode not in ["direct", "description"]:
              raise ValueError("`representation_mode` must be 'direct' or 'description'")
         self.representation_mode = representation_mode
@@ -1156,10 +1184,6 @@ class Hercules:
         self.cluster_print_indent_increment = max(1, cluster_print_indent_increment)
         self.use_llm_for_l0_descriptions = use_llm_for_l0_descriptions
         
-        self.use_resampling = use_resampling
-        self.resampling_points_per_cluster = max(1, resampling_points_per_cluster)
-        self.resampling_iterations = max(1, resampling_iterations)
-
         self.variable_names: list[str] | None = None
         self.numeric_metadata_by_name: dict[str, dict[str, Any]] | None = None
         self.input_data_type: str | None = None
@@ -2525,7 +2549,7 @@ IMPORTANT: Ensure the entire output is valid JSON. Do NOT include markdown fence
             self._log(f"\n--- Clustering Level {current_level_num} ---", level=1)
 
             clustering_basis_space: str | None = None
-            vectors_for_kmeans = []
+            vectors_for_clustering = []
             valid_prev_level_clusters = []
 
             if self.representation_mode == 'direct':
@@ -2533,7 +2557,7 @@ IMPORTANT: Ensure the entire output is valid JSON. Do NOT include markdown fence
                 if valid_clusters:
                      clustering_basis_space = valid_clusters[0].representation_vector_space
                      valid_clusters = [c for c in valid_clusters if c.representation_vector_space == clustering_basis_space]
-                     vectors_for_kmeans = [c.representation_vector for c in valid_clusters]
+                     vectors_for_clustering = [c.representation_vector for c in valid_clusters]
                      valid_prev_level_clusters = valid_clusters
                      self._log(f"Level {current_level_num}: Clustering {len(valid_prev_level_clusters)} prev level REPRESENTATION VECTORS (space: {clustering_basis_space}).", level=2)
                 else: self._log(f"Level {current_level_num}: No valid representation vectors found from previous level for direct mode clustering.", level=1)
@@ -2542,28 +2566,28 @@ IMPORTANT: Ensure the entire output is valid JSON. Do NOT include markdown fence
                 valid_clusters = [c for c in current_clusters if c.description_embedding is not None]
                 if valid_clusters:
                     clustering_basis_space = 'text_embedding'
-                    vectors_for_kmeans = [c.description_embedding for c in valid_clusters]
+                    vectors_for_clustering = [c.description_embedding for c in valid_clusters]
                     valid_prev_level_clusters = valid_clusters
                     self._log(f"Level {current_level_num}: Clustering {len(valid_prev_level_clusters)} prev level DESCRIPTION EMBEDDINGS.", level=2)
                 else: self._log(f"Level {current_level_num}: No valid description embeddings found from previous level for description mode clustering.", level=1)
 
-            if not valid_prev_level_clusters or not vectors_for_kmeans:
+            if not valid_prev_level_clusters or not vectors_for_clustering:
                 self._log("No valid clusters/vectors from previous level to cluster. Stopping hierarchy.", level=1); break
             n_items_to_cluster = len(valid_prev_level_clusters)
             if n_items_to_cluster < self.min_clusters_per_level:
                 self._log(f"Only {n_items_to_cluster} valid cluster(s) remain (min required: {self.min_clusters_per_level}). Stopping hierarchy.", level=1); break
 
             try:
-                 level_input_vectors = np.array(vectors_for_kmeans).astype(np.float32)
+                 level_input_vectors = np.array(vectors_for_clustering).astype(np.float32)
                  if level_input_vectors.ndim != 2: raise ValueError("Vectors are not 2D.")
                  if level_input_vectors.shape[0] != n_items_to_cluster: raise ValueError("Shape mismatch.")
                  if not np.all(np.isfinite(level_input_vectors)):
                       num_bad = np.sum(~np.isfinite(level_input_vectors))
-                      warnings.warn(f"Input vectors for KMeans L{current_level_num} contain {num_bad} non-finite values. Attempting nan_to_num.")
+                      warnings.warn(f"Input vectors for Clustering L{current_level_num} contain {num_bad} non-finite values. Attempting nan_to_num.")
                       level_input_vectors = np.nan_to_num(level_input_vectors, nan=0.0, posinf=0.0, neginf=0.0)
                       if not np.all(np.isfinite(level_input_vectors)): raise ValueError("Non-finite values persist after cleanup.")
-            except ValueError as e: print(f"Error preparing vectors for KMeans L{current_level_num}: {e}. Stopping."); break
-            except Exception as e: print(f"Unexpected error preparing vectors for KMeans L{current_level_num}: {e}. Stopping."); break
+            except ValueError as e: print(f"Error preparing vectors for Clustering L{current_level_num}: {e}. Stopping."); break
+            except Exception as e: print(f"Unexpected error preparing vectors for Clustering L{current_level_num}: {e}. Stopping."); break
 
             expected_dim = self.embedding_dims_.get(clustering_basis_space)
             if expected_dim is not None and expected_dim != level_input_vectors.shape[1]:
@@ -2587,106 +2611,117 @@ IMPORTANT: Ensure the entire output is valid JSON. Do NOT include markdown fence
             if k >= n_items_to_cluster and n_items_to_cluster > 0: k = n_items_to_cluster - 1; self._log(f"Adjusting k to {k} (must be < n_items={n_items_to_cluster}).", level=1)
             if k < 1: self._log(f"Adjusted k={k} is invalid (< 1). Stopping hierarchy.", level=1); break
             if k == 1 and n_items_to_cluster > 1: self._log(f"Determined k=1 for {n_items_to_cluster} items. Stopping hierarchy at Level {current_level_num-1}.", level=1); break
-            
-            self._log(f"    Performing initial KMeans (k={k}) on input I (shape: {level_input_vectors.shape}, space: {clustering_basis_space}) for Level {current_level_num}...", level=2)
-            
-            if not np.all(np.isfinite(level_input_vectors)):
-                warnings.warn(f"Input I for L{current_level_num} initial KMeans has non-finite values. Cleaning.")
-                level_input_vectors_cleaned = np.nan_to_num(level_input_vectors, nan=0.0, posinf=0.0, neginf=0.0)
-                if not np.all(np.isfinite(level_input_vectors_cleaned)):
-                    print(f"Error: Non-finite values persist in input I for L{current_level_num} after cleaning. Stopping."); break
-            else:
-                level_input_vectors_cleaned = level_input_vectors
 
-            try:
-                initial_kmeans = KMeans(n_clusters=k, random_state=self.random_state, 
-                                        n_init='auto' if 'auto' in KMeans().get_params() else 10)
-                current_labels = initial_kmeans.fit_predict(level_input_vectors_cleaned)
-                current_centroids = initial_kmeans.cluster_centers_
-                
-                if not np.all(np.isfinite(current_centroids)):
-                    warnings.warn(f"Initial KMeans L{current_level_num} produced non-finite centroids. Cleaning.")
-                    current_centroids = np.nan_to_num(current_centroids, nan=0.0, posinf=0.0, neginf=0.0)
-                
-                self._log(f"    Initial KMeans for L{current_level_num} complete. Centroids shape: {current_centroids.shape}, Labels count: {len(current_labels)}", level=2)
-            
-            except Exception as e_initial_kmeans:
-                print(f"Error during initial KMeans for L{current_level_num}: {e_initial_kmeans}. Stopping hierarchy."); break
+            labels = None
+            level_rep_vectors = None # Centroids
 
-            if self.use_resampling and self.resampling_points_per_cluster > 0 and self.resampling_iterations > 0 and k > 0:
-                self._log(f"  Starting resampling iterations (m={self.resampling_iterations}, rt={self.resampling_points_per_cluster}) for Level {current_level_num}...", level=2)
-                
-                for s_iter in range(self.resampling_iterations):
-                    self._log(f"    Resampling iteration {s_iter + 1}/{self.resampling_iterations}...", level=3)
-                    resampled_vectors_R_list = []
+            if self.clustering_method == 'kmeans':
+                self._log(f"    Performing KMeans (k={k}) on {level_input_vectors.shape[0]} vectors for Level {current_level_num}...", level=2)
+                try:
+                    kmeans_params = {'n_clusters': k, 'random_state': self.random_state}
+                    if 'n_init' in inspect.signature(KMeans).parameters:
+                        kmeans_params['n_init'] = 'auto'
+                    else:
+                        kmeans_params['n_init'] = 10
                     
-                    for cluster_idx in range(k):
-                        points_in_this_cluster_mask = (current_labels == cluster_idx)
-                        actual_points_vector_subset_I = level_input_vectors_cleaned[points_in_this_cluster_mask]
-                        
-                        if actual_points_vector_subset_I.shape[0] == 0:
-                            continue
+                    kmeans = KMeans(**kmeans_params)
+                    labels = kmeans.fit_predict(level_input_vectors)
+                    initial_centroids = kmeans.cluster_centers_
 
-                        centroid_of_this_cluster = current_centroids[cluster_idx].reshape(1, -1)
+                    if not np.all(np.isfinite(initial_centroids)):
+                        warnings.warn(f"KMeans L{current_level_num} produced non-finite centroids. Cleaning.")
+                        initial_centroids = np.nan_to_num(initial_centroids, nan=0.0, posinf=0.0, neginf=0.0)
+                    
+                    self._log(f"    KMeans for L{current_level_num} complete. Centroids shape: {initial_centroids.shape}", level=2)
+                    level_rep_vectors = initial_centroids
+
+                except Exception as e_kmeans:
+                    print(f"Error during KMeans for L{current_level_num}: {e_kmeans}. Stopping hierarchy."); break
+
+                # --- K-Means Resampling (only runs if enabled and method is kmeans) ---
+                if self.use_resampling and self.resampling_points_per_cluster > 0 and self.resampling_iterations > 0 and k > 0:
+                    self._log(f"  Starting resampling iterations (m={self.resampling_iterations}, rt={self.resampling_points_per_cluster}) for Level {current_level_num}...", level=2)
+                    current_centroids = level_rep_vectors
+                    current_labels = labels
+
+                    for s_iter in range(self.resampling_iterations):
+                        self._log(f"    Resampling iteration {s_iter + 1}/{self.resampling_iterations}...", level=3)
+                        resampled_vectors_R_list = []
                         
+                        for cluster_idx in range(k):
+                            points_in_this_cluster_mask = (current_labels == cluster_idx)
+                            actual_points_vector_subset_I = level_input_vectors[points_in_this_cluster_mask]
+                            if actual_points_vector_subset_I.shape[0] == 0: continue
+
+                            centroid_of_this_cluster = current_centroids[cluster_idx].reshape(1, -1)
+                            
+                            try:
+                                distances_to_centroid = np.linalg.norm(actual_points_vector_subset_I - centroid_of_this_cluster, axis=1)
+                                num_to_sample_rt = min(self.resampling_points_per_cluster, actual_points_vector_subset_I.shape[0])
+                                closest_indices_in_subset = np.argsort(distances_to_centroid)[:num_to_sample_rt]
+                                resampled_vectors_R_list.extend(actual_points_vector_subset_I[closest_indices_in_subset])
+                            except Exception as e_resample_dist:
+                                warnings.warn(f"Error during distance calculation for resampling (L{current_level_num}, cluster {cluster_idx}, iter {s_iter+1}): {e_resample_dist}")
+                                continue
+                                
+                        if not resampled_vectors_R_list or len(resampled_vectors_R_list) < k:
+                            self._log(f"    Not enough points collected ({len(resampled_vectors_R_list)}) in iter {s_iter+1}. Stopping resampling iterations.", level=2); break
+
+                        resampled_vectors_R_np = np.array(resampled_vectors_R_list).astype(np.float32)
+
                         try:
-                            distances_to_centroid = np.linalg.norm(actual_points_vector_subset_I - centroid_of_this_cluster, axis=1)
-                            num_to_sample_rt = min(self.resampling_points_per_cluster, actual_points_vector_subset_I.shape[0])
-                            closest_indices_in_subset = np.argsort(distances_to_centroid)[:num_to_sample_rt]
+                            kmeans_on_R = KMeans(n_clusters=k, random_state=self.random_state, n_init='auto' if 'auto' in KMeans().get_params() else 10)
+                            kmeans_on_R.fit(resampled_vectors_R_np)
+                            updated_centroids = kmeans_on_R.cluster_centers_
                             
-                            resampled_vectors_R_list.extend(actual_points_vector_subset_I[closest_indices_in_subset])
-                        except Exception as e_resample_dist:
-                            warnings.warn(f"Error during distance calculation for resampling (L{current_level_num}, cluster {cluster_idx}, iter {s_iter+1}): {e_resample_dist}")
-                            continue
-                            
-                    if not resampled_vectors_R_list or len(resampled_vectors_R_list) < k:
-                        self._log(f"    Not enough points collected for R ({len(resampled_vectors_R_list)}, need >= {k}) in iter {s_iter+1}. Stopping resampling iterations for this level.", level=2)
-                        break
+                            if not np.all(np.isfinite(updated_centroids)):
+                                warnings.warn(f"KMeans on resampled data produced non-finite centroids (L{current_level_num}, iter {s_iter+1}). Cleaning.")
+                                updated_centroids = np.nan_to_num(updated_centroids, nan=0.0, posinf=0.0, neginf=0.0)
+                            current_centroids = updated_centroids
+                        except Exception as e_kmeans_R:
+                            warnings.warn(f"Error during KMeans on resampled data (L{current_level_num}, iter {s_iter+1}): {e_kmeans_R}. Using centroids from previous step."); break
 
-                    resampled_vectors_R_np = np.array(resampled_vectors_R_list).astype(np.float32)
-                    self._log(f"      Collected {resampled_vectors_R_np.shape[0]} points for R.", level=3)
+                        try:
+                            distances_I_to_new_Ct = euclidean_distances(level_input_vectors, current_centroids)
+                            current_labels = np.argmin(distances_I_to_new_Ct, axis=1)
+                        except Exception as e_reassign:
+                            warnings.warn(f"Error during re-assignment to new centroids (L{current_level_num}, iter {s_iter+1}): {e_reassign}. Using labels from previous step."); break
+                    
+                    level_rep_vectors = current_centroids
+                    labels = current_labels
+                
+            elif self.clustering_method == 'agglomerative':
+                self._log(f"    Performing Agglomerative Clustering (k={k}, linkage='{self.agglomerative_linkage}', metric='{self.agglomerative_metric}') on {level_input_vectors.shape[0]} vectors for Level {current_level_num}...", level=2)
+                try:
+                    agg_model = AgglomerativeClustering(n_clusters=k, linkage=self.agglomerative_linkage, metric=self.agglomerative_metric)
+                    labels = agg_model.fit_predict(level_input_vectors)
 
-                    try:
-                        self._log(f"      Running KMeans on R (shape {resampled_vectors_R_np.shape}, k={k}) to update C_t...", level=3)
-                        kmeans_on_R = KMeans(n_clusters=k, random_state=self.random_state, 
-                                             n_init='auto' if 'auto' in KMeans().get_params() else 10)
-                        kmeans_on_R.fit(resampled_vectors_R_np)
-                        updated_centroids = kmeans_on_R.cluster_centers_
-                        
-                        if not np.all(np.isfinite(updated_centroids)):
-                            warnings.warn(f"KMeans on R (L{current_level_num}, iter {s_iter+1}) produced non-finite centroids. Cleaning.")
-                            updated_centroids = np.nan_to_num(updated_centroids, nan=0.0, posinf=0.0, neginf=0.0)
-                        current_centroids = updated_centroids
-                    except Exception as e_kmeans_R:
-                        warnings.warn(f"Error during KMeans on R (L{current_level_num}, iter {s_iter+1}): {e_kmeans_R}. Using centroids from previous iteration/initial step.")
-                        break
+                    # Manually compute centroids
+                    centroids = np.zeros((k, level_input_vectors.shape[1]), dtype=np.float32)
+                    for i in range(k):
+                        members = level_input_vectors[labels == i]
+                        if members.shape[0] > 0:
+                            centroids[i] = members.mean(axis=0)
+                        else:
+                            warnings.warn(f"Agglomerative clustering produced an empty cluster (label {i}) at Level {current_level_num}. Centroid will be zero vector.")
+                    
+                    level_rep_vectors = centroids
+                    self._log(f"    Agglomerative Clustering for L{current_level_num} complete. Computed centroids shape: {level_rep_vectors.shape}", level=2)
 
-                    try:
-                        self._log(f"      Re-assigning input I (shape {level_input_vectors_cleaned.shape}) to updated C_t (shape {current_centroids.shape}) to update L_t...", level=3)
-                        distances_I_to_new_Ct = euclidean_distances(level_input_vectors_cleaned, current_centroids)
-                        updated_labels = np.argmin(distances_I_to_new_Ct, axis=1)
-                        current_labels = updated_labels
-                        self._log(f"      Re-assignment complete. Iter {s_iter+1} for L{current_level_num} finished.", level=3)
-                    except Exception as e_reassign:
-                        warnings.warn(f"Error during re-assignment of I to new C_t (L{current_level_num}, iter {s_iter+1}): {e_reassign}. Using labels from previous iteration/initial step.")
-                        break
-            else:
-                self._log(f"  Resampling not applied for Level {current_level_num} (use_resampling={self.use_resampling}, rt={self.resampling_points_per_cluster}, m={self.resampling_iterations}, k={k}).", level=2)
+                except Exception as e_agg:
+                    print(f"Error during Agglomerative Clustering for L{current_level_num}: {e_agg}. Stopping hierarchy."); break
 
-            level_rep_vectors = current_centroids
-            labels = current_labels
+            if labels is None or level_rep_vectors is None:
+                self._log("Clustering failed to produce labels or centroids. Stopping hierarchy.", level=1); break
             
-            self._log(f"Creating {k} new parent clusters for Level {current_level_num} based on final assignments...", level=2)
+            self._log(f"Creating {k} new parent clusters for Level {current_level_num}...", level=2)
             new_parent_clusters_map: dict[int, Cluster] = {} 
             next_level_clusters: list[Cluster] = []
             
-            if not valid_prev_level_clusters and len(labels) > 0:
-                print(f"Error: Labels generated but no valid_prev_level_clusters (items from C_t-1) to assign them to at L{current_level_num}. Stopping."); break
-            
-            parent_data_type = valid_prev_level_clusters[0].original_data_type if valid_prev_level_clusters else self.input_data_type
-
             if len(labels) != len(valid_prev_level_clusters):
-                print(f"Error: Mismatch between number of labels ({len(labels)}) and number of items from previous level ({len(valid_prev_level_clusters)}) at L{current_level_num}. Stopping."); break
+                print(f"Error: Mismatch between labels ({len(labels)}) and prev level items ({len(valid_prev_level_clusters)}) at L{current_level_num}. Stopping."); break
+            
+            parent_data_type = valid_prev_level_clusters[0].original_data_type
 
             for i, label_val in enumerate(labels):
                 child_cluster_from_prev_level = valid_prev_level_clusters[i]
@@ -2755,22 +2790,16 @@ IMPORTANT: Ensure the entire output is valid JSON. Do NOT include markdown fence
 
         self._log(f"--- Starting Hercules Clustering Run: {self._run_id} ---", level=1)
         self._log(f"Hercules Version: {self.HERCULES_VERSION}", level=1)
-        self._log(f"Verbosity Level: {self.verbose}", level=1)
+        self._log(f"Clustering Method: {self.clustering_method}", level=1)
         self._log(f"Representation Mode: {self.representation_mode}", level=1)
         if self.level_cluster_counts is None: self._log(f"Automatic K Mode: Enabled (Method: {self.auto_k_method}, Max K: {self.auto_k_max})", level=1)
         else: self._log(f"Automatic K Mode: Disabled (Using level_cluster_counts: {self.level_cluster_counts})", level=1)
         if self.reduction_methods: self._log(f"Reduction Methods: {self.reduction_methods} ({self.n_reduction_components} components)", level=1)
         if self._current_topic_seed: self._log(f"Topic Seed: '{self._current_topic_seed}'", level=1)
-        if numeric_metadata: self._log("Numeric metadata provided.", level=1)
-        if self.prompt_include_immediate_children: self._log(f"Prompting includes immediate children (Strategy: {self.prompt_immediate_child_sample_strategy}, Size: {self.prompt_immediate_child_sample_size}).", level=1)
 
         try:
             standardized_data, original_ids, input_type = self._prepare_input_data(data, numeric_metadata)
             self._log(f"Input data type detected: {input_type}", level=1)
-            if isinstance(standardized_data, np.ndarray): self._log(f"  Scaled numeric data shape: {standardized_data.shape}", level=2)
-            else: self._log(f"  Input items count: {len(standardized_data)}", level=2)
-            if self.original_numeric_data_ is not None: self._log(f"  Original numeric data shape: {self.original_numeric_data_.shape}", level=2)
-            if self.variable_names: self._log(f"  Using numeric variable names: {self.variable_names}", level=1)
         except (ValueError, TypeError, RuntimeError) as e:
             print(f"Error: Input data preparation failed: {e}"); return []
 
@@ -2785,16 +2814,12 @@ IMPORTANT: Ensure the entire output is valid JSON. Do NOT include markdown fence
 
         if self.representation_mode == 'description':
              self._log("Assigning L0 description embeddings to representation vectors (description mode)...", level=2)
-             assigned_count = 0
              for cluster in self._l0_clusters_ordered:
                  if cluster.description_embedding is not None:
                      cluster.representation_vector = cluster.description_embedding
                      cluster.representation_vector_space = 'text_embedding'
-                     assigned_count += 1
                  else:
-                     cluster.representation_vector = None
-                     cluster.representation_vector_space = None
-             self._log(f"  Assigned {assigned_count} L0 description embeddings as representation vectors.", level=2)
+                     cluster.representation_vector = None; cluster.representation_vector_space = None
 
         if self.reduction_methods:
              self._apply_reductions_to_embeddings(self._l0_clusters_ordered, 'representation_vector')
@@ -3464,6 +3489,9 @@ IMPORTANT: Ensure the entire output is valid JSON. Do NOT include markdown fence
             "__hercules_version__": self.HERCULES_VERSION,
             "config": {
                  "level_cluster_counts": self.level_cluster_counts,
+                 "clustering_method": self.clustering_method,
+                 "agglomerative_linkage": self.agglomerative_linkage,
+                 "agglomerative_metric": self.agglomerative_metric,
                  "representation_mode": self.representation_mode,
                  "auto_k_method": self.auto_k_method,
                  "auto_k_max": self.auto_k_max,
@@ -3787,6 +3815,8 @@ if __name__ == '__main__':
 
     # --- 1. Configuration for this minimalist example ---
     EXAMPLE_DATA_TYPE = 'numeric_numpy'
+    # Switch between 'kmeans' and 'agglomerative' to test
+    CLUSTERING_METHOD = 'agglomerative'
     REPRESENTATION_MODE = 'direct'
     USE_AUTO_K = True # Set to False to use fixed_hierarchy_levels
     SAVE_AND_LOAD_MODEL = False # Set to True to test saving/loading
@@ -3796,8 +3826,8 @@ if __name__ == '__main__':
     N_FEATURES = 4
     N_TRUE_CLUSTERS = 3 # For dummy labels, and for fixed_k if USE_AUTO_K is False
 
-    MODEL_FILENAME = f"hercules_minimal_{EXAMPLE_DATA_TYPE}_{REPRESENTATION_MODE}.json"
-    RUN_DETAILS_DIR = f"hercules_minimal_run_{EXAMPLE_DATA_TYPE}"
+    MODEL_FILENAME = f"hercules_minimal_{CLUSTERING_METHOD}_{EXAMPLE_DATA_TYPE}.json"
+    RUN_DETAILS_DIR = f"hercules_minimal_run_{CLUSTERING_METHOD}_{EXAMPLE_DATA_TYPE}"
 
     # --- 2. Prepare Dummy Data ---
     print(f"\n--- Preparing dummy data: {EXAMPLE_DATA_TYPE} ---")
@@ -3850,6 +3880,11 @@ if __name__ == '__main__':
         
         hercules_instance = Hercules(
             level_cluster_counts=cluster_counts_arg,
+            clustering_method=CLUSTERING_METHOD,
+            # These are only used if clustering_method is 'agglomerative'
+            agglomerative_linkage='ward', 
+            agglomerative_metric='euclidean',
+            # ---
             text_embedding_client=_dummy_text_embedding_function,
             llm_client=_dummy_llm_function,
             image_embedding_client=_dummy_image_embedding_function,
@@ -3866,7 +3901,7 @@ if __name__ == '__main__':
             use_llm_for_l0_descriptions=(EXAMPLE_DATA_TYPE == 'text') # Example: only use for text L0
         )
 
-        print(f"\nStarting clustering ({EXAMPLE_DATA_TYPE}, {REPRESENTATION_MODE} mode)...")
+        print(f"\nStarting clustering ({CLUSTERING_METHOD}, {REPRESENTATION_MODE} mode)...")
         start_time = time.time()
         top_level_clusters = hercules_instance.cluster(
             input_data,
